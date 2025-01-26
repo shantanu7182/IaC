@@ -1,122 +1,75 @@
-#This solution, non-production-ready template describes AWS Codepipeline based CICD Pipeline for terraform code deployment.
 
-terraform {
-  required_version = ">= 1.0.0"
+/**
+ * This will create VM on GCP
+ */
 
-  required_providers {
-    aws = {
-      source = "hashicorp/aws"
-      version = ">= 4.20.1"
+resource "null_resource" "module_depends_on" {
+  triggers = {
+    value = length(var.module_depends_on)
+  }
+}
+
+resource "google_compute_resource_policy" "policy" {
+  name    = var.name
+  project = var.project
+  region  = var.region
+
+  snapshot_schedule_policy {
+    retention_policy {
+      max_retention_days    = var.snapshot_retention_policy.max_retention_days
+      on_source_disk_delete = var.snapshot_retention_policy.on_source_disk_delete
+    }
+
+    schedule {
+      dynamic "daily_schedule" {
+        for_each = var.snapshot_schedule.daily_schedule == null ? [] : [var.snapshot_schedule.daily_schedule]
+        content {
+          days_in_cycle = daily_schedule.value.days_in_cycle
+          start_time    = daily_schedule.value.start_time
+        }
+      }
+
+      dynamic "hourly_schedule" {
+        for_each = var.snapshot_schedule.hourly_schedule == null ? [] : [var.snapshot_schedule.hourly_schedule]
+        content {
+          hours_in_cycle = hourly_schedule.value["hours_in_cycle"]
+          start_time     = hourly_schedule.value["start_time"]
+        }
+      }
+
+      dynamic "weekly_schedule" {
+        for_each = var.snapshot_schedule.weekly_schedule == null ? [] : [var.snapshot_schedule.weekly_schedule]
+        content {
+          dynamic "day_of_weeks" {
+            for_each = weekly_schedule.value.day_of_weeks
+            content {
+              day        = day_of_weeks.value["day"]
+              start_time = day_of_weeks.value["start_time"]
+            }
+          }
+        }
+      }
+    }
+
+    dynamic "snapshot_properties" {
+      for_each = var.snapshot_properties == null ? [] : [var.snapshot_properties]
+      content {
+        guest_flush       = snapshot_properties.value["guest_flush"]
+        labels            = snapshot_properties.value["labels"]
+        storage_locations = snapshot_properties.value["storage_locations"]
+      }
     }
   }
 
+  depends_on = [null_resource.module_depends_on]
 }
 
-#Module for creating a new S3 bucket for storing pipeline artifacts
-module "s3_artifacts_bucket" {
-  source                = "./modules/s3"
-  project_name          = var.project_name
-  kms_key_arn           = module.codepipeline_kms.arn
-  codepipeline_role_arn = module.codepipeline_iam_role.role_arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
-  }
-}
+resource "google_compute_disk_resource_policy_attachment" "attachment" {
+  for_each = toset(var.disks)
+  name     = google_compute_resource_policy.policy.name
+  project  = element(split("/", each.key), index(split("/", each.key), "projects", ) + 1, )
+  disk     = element(split("/", each.key), index(split("/", each.key), "disks", ) + 1, )
+  zone     = element(split("/", each.key), index(split("/", each.key), "zones", ) + 1, )
 
-# Resources
-
-# Module for Infrastructure Source code repository
-module "codecommit_infrastructure_source_repo" {
-  source = "./modules/codecommit"
-
-  create_new_repo          = var.create_new_repo
-  source_repository_name   = var.source_repo_name
-  source_repository_branch = var.source_repo_branch
-  repo_approvers_arn       = var.repo_approvers_arn
-  kms_key_arn              = module.codepipeline_kms.arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
-  }
-
-}
-
-# Module for Infrastructure Validation - CodeBuild
-module "codebuild_terraform" {
-  depends_on = [
-    module.codecommit_infrastructure_source_repo
-  ]
-  source = "./modules/codebuild"
-
-  project_name                        = var.project_name
-  role_arn                            = module.codepipeline_iam_role.role_arn
-  s3_bucket_name                      = module.s3_artifacts_bucket.bucket
-  build_projects                      = var.build_projects
-  build_project_source                = var.build_project_source
-  builder_compute_type                = var.builder_compute_type
-  builder_image                       = var.builder_image
-  builder_image_pull_credentials_type = var.builder_image_pull_credentials_type
-  builder_type                        = var.builder_type
-  kms_key_arn                         = module.codepipeline_kms.arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
-  }
-}
-
-module "codepipeline_kms" {
-  source                = "./modules/kms"
-  codepipeline_role_arn = module.codepipeline_iam_role.role_arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
-  }
-
-}
-
-module "codepipeline_iam_role" {
-  source                     = "./modules/iam-role"
-  project_name               = var.project_name
-  create_new_role            = var.create_new_role
-  codepipeline_iam_role_name = var.create_new_role == true ? "${var.project_name}-codepipeline-role" : var.codepipeline_iam_role_name
-  source_repository_name     = var.source_repo_name
-  kms_key_arn                = module.codepipeline_kms.arn
-  s3_bucket_arn              = module.s3_artifacts_bucket.arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
-  }
-}
-# Module for Infrastructure Validate, Plan, Apply and Destroy - CodePipeline
-module "codepipeline_terraform" {
-  depends_on = [
-    module.codebuild_terraform,
-    module.s3_artifacts_bucket
-  ]
-  source = "./modules/codepipeline"
-
-  project_name          = var.project_name
-  source_repo_name      = var.source_repo_name
-  source_repo_branch    = var.source_repo_branch
-  s3_bucket_name        = module.s3_artifacts_bucket.bucket
-  codepipeline_role_arn = module.codepipeline_iam_role.role_arn
-  stages                = var.stage_input
-  kms_key_arn           = module.codepipeline_kms.arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
-  }
+  depends_on = [null_resource.module_depends_on]
 }
