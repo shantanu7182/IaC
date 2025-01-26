@@ -1,122 +1,132 @@
-#This solution, non-production-ready template describes AWS Codepipeline based CICD Pipeline for terraform code deployment.
-
-terraform {
-  required_version = ">= 1.0.0"
-
-  required_providers {
-    aws = {
-      source = "hashicorp/aws"
-      version = ">= 4.20.1"
-    }
-  }
-
+#This will create VM in Azure
+resource "random_pet" "rg_name" {
+  prefix = var.resource_group_name_prefix
 }
 
-#Module for creating a new S3 bucket for storing pipeline artifacts
-module "s3_artifacts_bucket" {
-  source                = "./modules/s3"
-  project_name          = var.project_name
-  kms_key_arn           = module.codepipeline_kms.arn
-  codepipeline_role_arn = module.codepipeline_iam_role.role_arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
-  }
+resource "azurerm_resource_group" "rg" {
+  location = var.resource_group_location
+  name     = random_pet.rg_name.id
 }
 
-# Resources
-
-# Module for Infrastructure Source code repository
-module "codecommit_infrastructure_source_repo" {
-  source = "./modules/codecommit"
-
-  create_new_repo          = var.create_new_repo
-  source_repository_name   = var.source_repo_name
-  source_repository_branch = var.source_repo_branch
-  repo_approvers_arn       = var.repo_approvers_arn
-  kms_key_arn              = module.codepipeline_kms.arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
-  }
-
+# Create virtual network
+resource "azurerm_virtual_network" "my_terraform_network" {
+  name                = "myVnet"
+  address_space       = ["10.0.0.0/16"]
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
 }
 
-# Module for Infrastructure Validation - CodeBuild
-module "codebuild_terraform" {
-  depends_on = [
-    module.codecommit_infrastructure_source_repo
-  ]
-  source = "./modules/codebuild"
+# Create subnet
+resource "azurerm_subnet" "my_terraform_subnet" {
+  name                 = "mySubnet"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.my_terraform_network.name
+  address_prefixes     = ["10.0.1.0/24"]
+}
 
-  project_name                        = var.project_name
-  role_arn                            = module.codepipeline_iam_role.role_arn
-  s3_bucket_name                      = module.s3_artifacts_bucket.bucket
-  build_projects                      = var.build_projects
-  build_project_source                = var.build_project_source
-  builder_compute_type                = var.builder_compute_type
-  builder_image                       = var.builder_image
-  builder_image_pull_credentials_type = var.builder_image_pull_credentials_type
-  builder_type                        = var.builder_type
-  kms_key_arn                         = module.codepipeline_kms.arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
+# Create public IPs
+resource "azurerm_public_ip" "my_terraform_public_ip" {
+  name                = "myPublicIP"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Dynamic"
+}
+
+# Create Network Security Group and rule
+resource "azurerm_network_security_group" "my_terraform_nsg" {
+  name                = "myNetworkSecurityGroup"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  security_rule {
+    name                       = "SSH"
+    priority                   = 1001
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "22"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
   }
 }
 
-module "codepipeline_kms" {
-  source                = "./modules/kms"
-  codepipeline_role_arn = module.codepipeline_iam_role.role_arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
-  }
+# Create network interface
+resource "azurerm_network_interface" "my_terraform_nic" {
+  name                = "myNIC"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
 
-}
-
-module "codepipeline_iam_role" {
-  source                     = "./modules/iam-role"
-  project_name               = var.project_name
-  create_new_role            = var.create_new_role
-  codepipeline_iam_role_name = var.create_new_role == true ? "${var.project_name}-codepipeline-role" : var.codepipeline_iam_role_name
-  source_repository_name     = var.source_repo_name
-  kms_key_arn                = module.codepipeline_kms.arn
-  s3_bucket_arn              = module.s3_artifacts_bucket.arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
+  ip_configuration {
+    name                          = "my_nic_configuration"
+    subnet_id                     = azurerm_subnet.my_terraform_subnet.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.my_terraform_public_ip.id
   }
 }
-# Module for Infrastructure Validate, Plan, Apply and Destroy - CodePipeline
-module "codepipeline_terraform" {
-  depends_on = [
-    module.codebuild_terraform,
-    module.s3_artifacts_bucket
-  ]
-  source = "./modules/codepipeline"
 
-  project_name          = var.project_name
-  source_repo_name      = var.source_repo_name
-  source_repo_branch    = var.source_repo_branch
-  s3_bucket_name        = module.s3_artifacts_bucket.bucket
-  codepipeline_role_arn = module.codepipeline_iam_role.role_arn
-  stages                = var.stage_input
-  kms_key_arn           = module.codepipeline_kms.arn
-  tags = {
-    Project_Name = var.project_name
-    Environment  = var.environment
-    Account_ID   = local.account_id
-    Region       = local.region
+# Connect the security group to the network interface
+resource "azurerm_network_interface_security_group_association" "example" {
+  network_interface_id      = azurerm_network_interface.my_terraform_nic.id
+  network_security_group_id = azurerm_network_security_group.my_terraform_nsg.id
+}
+
+# Generate random text for a unique storage account name
+resource "random_id" "random_id" {
+  keepers = {
+    # Generate a new ID only when a new resource group is defined
+    resource_group = azurerm_resource_group.rg.name
+  }
+
+  byte_length = 8
+}
+
+# Create storage account for boot diagnostics
+resource "azurerm_storage_account" "my_storage_account" {
+  name                     = "diag${random_id.random_id.hex}"
+  location                 = azurerm_resource_group.rg.location
+  resource_group_name      = azurerm_resource_group.rg.name
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+}
+
+# Create (and display) an SSH key
+resource "tls_private_key" "example_ssh" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+# Create virtual machine
+resource "azurerm_linux_virtual_machine" "my_terraform_vm" {
+  name                  = "myVM"
+  location              = azurerm_resource_group.rg.location
+  resource_group_name   = azurerm_resource_group.rg.name
+  network_interface_ids = [azurerm_network_interface.my_terraform_nic.id]
+  size                  = "Standard_DS1_v2"
+
+  os_disk {
+    name                 = "myOsDisk"
+    caching              = "ReadWrite"
+    storage_account_type = "Premium_LRS"
+  }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "0001-com-ubuntu-server-jammy"
+    sku       = "22_04-lts-gen2"
+    version   = "latest"
+  }
+
+  computer_name                   = "myvm"
+  admin_username                  = "azureuser"
+  disable_password_authentication = true
+
+  admin_ssh_key {
+    username   = "azureuser"
+    public_key = tls_private_key.example_ssh.public_key_openssh
+  }
+
+  boot_diagnostics {
+    storage_account_uri = azurerm_storage_account.my_storage_account.primary_blob_endpoint
   }
 }
